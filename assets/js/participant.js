@@ -1,6 +1,6 @@
 (async()=>{
   const M=MM; let session=null, groupNo=null, branches=[], nodes=[], selectedBranch=null, selectedNode=null, poll=null;
-  const codeEl=M.$('#sessionCode'); const fromUrl=M.q('session'); if(fromUrl) codeEl.value=fromUrl.toUpperCase(); M.$('.footer').textContent='JenaCraft · MindMap';
+  const codeEl=M.$('#sessionCode'); const fromUrl=M.q('session'); if(fromUrl) codeEl.value=fromUrl.toUpperCase(); M.$('.footer').textContent='JenaCraft · Kollaborative Mindmap';
   const syncExportPermission=()=>M.$$('#expSvg,#expJpg,#expPdf').forEach(button=>button.classList.toggle('hidden',!session?.participants_can_export));
   async function loadSession(){if(!M.configuredGuard())return;const code=codeEl.value.trim().toUpperCase();if(!code)return;const {data,error}=await db.rpc('get_session_public',{p_code:code});if(error||!data){M.toast(error?.message||'Session nicht gefunden','error');return}session=data.session;branches=data.branches||[];M.$('#sessionPreview').classList.remove('hidden');M.$('#sessionPreview').innerHTML=`<h3>${M.esc(session.title)}</h3><p>${branches.length} vorbereitete Äste · ${session.is_open?'offen':'gesperrt'}</p>`;M.$('#groupPanel').classList.remove('hidden');renderKeypad();}
   function renderKeypad(){const k=M.$('#keypad');k.innerHTML='';for(let i=1;i<=12;i++){const b=document.createElement('button');b.textContent=i;b.onclick=()=>joinGroup(i);k.appendChild(b)}}
