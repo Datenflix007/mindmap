@@ -43,6 +43,9 @@ alter table public.mm_sessions
   add column if not exists root_position text not null default 'left',
   add column if not exists root_orientation text not null default 'horizontal';
 
+alter table public.mm_branches
+  add column if not exists color text not null default '#eef8c9';
+
 do $$
 begin
   if not exists (select 1 from pg_constraint where conname='mm_sessions_root_position_check') then
@@ -140,7 +143,7 @@ begin
   if not found then return null; end if;
   return jsonb_build_object(
     'session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at),
-    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
+    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
   );
 end $$;
 
@@ -235,12 +238,83 @@ begin
       'participants_can_export',s.participants_can_export,
       'root_position',s.root_position,'root_orientation',s.root_orientation
     ),
-    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
+    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
     'nodes',coalesce((select jsonb_agg(jsonb_build_object(
       'id',id,'branch_id',branch_id,'parent_id',parent_id,'group_no',group_no,
       'text',text,'created_at',created_at,'updated_at',updated_at
     ) order by created_at) from public.mm_nodes where session_id=s.id),'[]'::jsonb)
   );
+end $$;
+
+create or replace function public.update_branch_color(
+  p_code text,
+  p_moderator_token text,
+  p_branch_id uuid,
+  p_color text
+)
+returns void
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then
+    raise exception 'Moderator-Zugriff verweigert';
+  end if;
+  if p_color !~ '^#[0-9A-Fa-f]{6}$' then raise exception 'Ungültige Astfarbe'; end if;
+  update public.mm_branches set color=lower(p_color) where id=p_branch_id and session_id=s.id;
+  if not found then raise exception 'Ast nicht gefunden'; end if;
+end $$;
+
+create or replace function public.moderator_update_node(
+  p_code text,
+  p_moderator_token text,
+  p_node_id uuid,
+  p_text text
+)
+returns void
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if p_text is null or btrim(p_text)='' then raise exception 'Text fehlt'; end if;
+  update public.mm_nodes set text=left(btrim(p_text),240),updated_at=now() where id=p_node_id and session_id=s.id;
+  if not found then raise exception 'Knoten nicht gefunden'; end if;
+end $$;
+
+create or replace function public.moderator_move_node(
+  p_code text,
+  p_moderator_token text,
+  p_node_id uuid,
+  p_target_branch_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if not exists(select 1 from public.mm_branches where id=p_target_branch_id and session_id=s.id) then raise exception 'Zielast nicht gefunden'; end if;
+  if not exists(select 1 from public.mm_nodes where id=p_node_id and session_id=s.id) then raise exception 'Knoten nicht gefunden'; end if;
+  with recursive subtree as (
+    select id from public.mm_nodes where id=p_node_id and session_id=s.id
+    union all
+    select child.id from public.mm_nodes child join subtree tree on child.parent_id=tree.id where child.session_id=s.id
+  )
+  update public.mm_nodes
+    set branch_id=p_target_branch_id,
+        parent_id=case when id=p_node_id then null else parent_id end,
+        updated_at=now()
+    where id in (select id from subtree);
 end $$;
 
 -- Ausschließlich der Moderator einer Session darf Darstellungs- und Exportrechte ändern.
@@ -372,7 +446,13 @@ grant execute on function public.set_session_open(text,text,boolean) to anon, au
 grant execute on function public.mark_collected(text,text) to anon, authenticated;
 grant execute on function public.reset_session_to_template(text,text) to anon, authenticated;
 grant execute on function public.update_session_settings(text,text,text,text,boolean) to anon, authenticated;
+grant execute on function public.update_branch_color(text,text,uuid,text) to anon, authenticated;
+grant execute on function public.moderator_update_node(text,text,uuid,text) to anon, authenticated;
+grant execute on function public.moderator_move_node(text,text,uuid,uuid) to anon, authenticated;
 
 -- Hilfsfunktionen nicht direkt aus dem Browser aufrufen.
 revoke execute on function public.mm_make_code() from public, anon, authenticated;
 revoke execute on function public.mm_token_ok(uuid,text) from public, anon, authenticated;
+
+-- PostgREST soll die gerade angelegten RPCs ohne Wartezeit erkennen.
+notify pgrst, 'reload schema';
