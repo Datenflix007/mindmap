@@ -520,6 +520,103 @@ begin
 end $$;
 
 -- Browserzugriff nur auf die benötigten RPC-Funktionen.
+-- Löscht ausschließlich die mit dem Moderator-Token autorisierte Session.
+-- Abhängige Äste und Knoten werden durch ON DELETE CASCADE mit entfernt.
+create or replace function public.delete_session(p_code text,p_moderator_token text)
+returns void
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  delete from public.mm_sessions where id=s.id;
+end $$;
+
+-- 30 Tage sind die zentrale Standard-Aufbewahrungsdauer. Diese Funktion wird
+-- nur durch Supabase Cron ausgeführt und nie an Browserrollen freigegeben.
+create or replace function public.cleanup_old_mindmap_sessions()
+returns integer
+language plpgsql
+security definer
+set search_path=public
+as $$
+declare deleted_count integer;
+begin
+  delete from public.mm_sessions where created_at < now() - interval '30 days';
+  get diagnostics deleted_count = row_count;
+  return deleted_count;
+end $$;
+
+-- Stellt ein geprüftes JSON-Backup immer als neue Session wieder her. Alte IDs
+-- werden nur als Mapping-Werte verwendet und niemals wiederverwendet.
+create or replace function public.restore_session_from_backup(p_backup jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare
+  s public.mm_sessions; tok text; mindmap jsonb; settings jsonb;
+  branch_item jsonb; node_item jsonb; parent_item jsonb;
+  branch_map jsonb:='{}'::jsonb; node_map jsonb:='{}'::jsonb; node_seen jsonb:='{}'::jsonb;
+  legacy_id text; parent_legacy_id text; branch_legacy_id text; new_id uuid;
+  item_count integer:=0; made_count integer; restored_count integer; order_index integer:=0; node_group integer;
+begin
+  if jsonb_typeof(p_backup)<>'object' or p_backup->>'format'<>'jenacraft-mindmap' or p_backup->>'version'<>'1' then raise exception 'Ungültiges Mindmap-Backupformat'; end if;
+  mindmap:=p_backup->'mindmap'; settings:=p_backup->'settings';
+  if jsonb_typeof(mindmap)<>'object' or jsonb_typeof(settings)<>'object' or jsonb_typeof(p_backup->'branches')<>'array' or jsonb_typeof(p_backup->'nodes')<>'array' then raise exception 'Unvollständiges Mindmap-Backup'; end if;
+  if jsonb_typeof(mindmap->'title')<>'string' or char_length(btrim(mindmap->>'title')) not between 1 and 120 then raise exception 'Ungültiger Mindmap-Titel'; end if;
+  if coalesce(mindmap->>'root_position','') not in ('left','right','top','bottom','center') or coalesce(mindmap->>'root_orientation','') not in ('horizontal','vertical') or jsonb_typeof(settings->'participants_can_export')<>'boolean' then raise exception 'Ungültige Mindmap-Einstellungen'; end if;
+  if jsonb_array_length(p_backup->'branches')<1 then raise exception 'Mindestens ein Ast wird benötigt'; end if;
+
+  tok:=encode(extensions.gen_random_bytes(24),'hex');
+  insert into public.mm_sessions(code,title,template_key,moderator_secret_hash,participants_can_export,root_position,root_orientation)
+  values(public.mm_make_code(),left(btrim(mindmap->>'title'),120),left(coalesce(nullif(btrim(mindmap->>'template_key'),''),'custom'),80),encode(extensions.digest(tok,'sha256'),'hex'),(settings->>'participants_can_export')::boolean,mindmap->>'root_position',mindmap->>'root_orientation') returning * into s;
+  for branch_item in select value from jsonb_array_elements(p_backup->'branches') loop
+    legacy_id:=branch_item->>'legacy_id';
+    if jsonb_typeof(branch_item)<>'object' or legacy_id is null or char_length(legacy_id) not between 1 and 120 or branch_map ? legacy_id or jsonb_typeof(branch_item->'title')<>'string' or char_length(btrim(branch_item->>'title')) not between 1 and 80 then raise exception 'Ungültiger oder doppelter Ast im Backup'; end if;
+    if branch_item ? 'color' and branch_item->>'color' is not null and branch_item->>'color' !~ '^#[0-9A-Fa-f]{6}$' then raise exception 'Ungültige Astfarbe'; end if;
+    if branch_item ? 'sort_order' and (jsonb_typeof(branch_item->'sort_order')<>'number' or branch_item->>'sort_order' !~ '^[0-9]+$') then raise exception 'Ungültige Astreihenfolge'; end if;
+    if (branch_item ? 'layout_x' and branch_item->>'layout_x' is not null and (jsonb_typeof(branch_item->'layout_x')<>'number' or abs((branch_item->>'layout_x')::double precision)>10000)) or (branch_item ? 'layout_y' and branch_item->>'layout_y' is not null and (jsonb_typeof(branch_item->'layout_y')<>'number' or abs((branch_item->>'layout_y')::double precision)>10000)) or (branch_item ? 'bend_x' and branch_item->>'bend_x' is not null and (jsonb_typeof(branch_item->'bend_x')<>'number' or abs((branch_item->>'bend_x')::double precision)>10000)) or (branch_item ? 'bend_y' and branch_item->>'bend_y' is not null and (jsonb_typeof(branch_item->'bend_y')<>'number' or abs((branch_item->>'bend_y')::double precision)>10000)) then raise exception 'Ungültige Astposition'; end if;
+    insert into public.mm_branches(session_id,title,sort_order,color,layout_x,layout_y,bend_x,bend_y) values(s.id,btrim(branch_item->>'title'),coalesce((branch_item->>'sort_order')::int,order_index),coalesce(lower(branch_item->>'color'),'#eef8c9'),(branch_item->>'layout_x')::double precision,(branch_item->>'layout_y')::double precision,(branch_item->>'bend_x')::double precision,(branch_item->>'bend_y')::double precision) returning id into new_id;
+    branch_map:=branch_map||jsonb_build_object(legacy_id,new_id::text); order_index:=order_index+1;
+  end loop;
+  for node_item in select value from jsonb_array_elements(p_backup->'nodes') loop
+    legacy_id:=node_item->>'legacy_id'; branch_legacy_id:=node_item->>'branch_legacy_id'; parent_legacy_id:=node_item->>'legacy_parent_id';
+    if jsonb_typeof(node_item)<>'object' or legacy_id is null or char_length(legacy_id) not between 1 and 120 or branch_legacy_id is null or node_seen ? legacy_id or not (branch_map ? branch_legacy_id) or jsonb_typeof(node_item->'text')<>'string' or char_length(btrim(node_item->>'text')) not between 1 and 240 or jsonb_typeof(node_item->'group_no')<>'number' or node_item->>'group_no' !~ '^[0-9]+$' then raise exception 'Ungültiger oder doppelter Knoten im Backup'; end if;
+    node_group:=(node_item->>'group_no')::int; if node_group not between 1 and 99 then raise exception 'Ungültige Gruppe im Backup'; end if;
+    if (node_item ? 'layout_x' and node_item->>'layout_x' is not null and (jsonb_typeof(node_item->'layout_x')<>'number' or abs((node_item->>'layout_x')::double precision)>10000)) or (node_item ? 'layout_y' and node_item->>'layout_y' is not null and (jsonb_typeof(node_item->'layout_y')<>'number' or abs((node_item->>'layout_y')::double precision)>10000)) or (node_item ? 'bend_x' and node_item->>'bend_x' is not null and (jsonb_typeof(node_item->'bend_x')<>'number' or abs((node_item->>'bend_x')::double precision)>10000)) or (node_item ? 'bend_y' and node_item->>'bend_y' is not null and (jsonb_typeof(node_item->'bend_y')<>'number' or abs((node_item->>'bend_y')::double precision)>10000)) then raise exception 'Ungültige Knotenposition'; end if;
+    if parent_legacy_id is not null then
+      select value into parent_item from jsonb_array_elements(p_backup->'nodes') where value->>'legacy_id'=parent_legacy_id limit 1;
+      if parent_item is null or parent_item->>'branch_legacy_id'<>branch_legacy_id or parent_item->>'group_no'<>node_item->>'group_no' then raise exception 'Ungültige Elternbeziehung im Backup'; end if;
+    end if;
+    node_seen:=node_seen||jsonb_build_object(legacy_id,true); item_count:=item_count+1;
+  end loop;
+  for node_item in select value from jsonb_array_elements(p_backup->'nodes') loop
+    if node_item->>'legacy_parent_id' is null then
+      insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text,layout_x,layout_y,bend_x,bend_y) values(s.id,(node_item->>'group_no')::int,(branch_map->>(node_item->>'branch_legacy_id'))::uuid,null,btrim(node_item->>'text'),(node_item->>'layout_x')::double precision,(node_item->>'layout_y')::double precision,(node_item->>'bend_x')::double precision,(node_item->>'bend_y')::double precision) returning id into new_id;
+      node_map:=node_map||jsonb_build_object(node_item->>'legacy_id',new_id::text);
+    end if;
+  end loop;
+  loop
+    made_count:=0;
+    for node_item in select value from jsonb_array_elements(p_backup->'nodes') loop
+      legacy_id:=node_item->>'legacy_id'; parent_legacy_id:=node_item->>'legacy_parent_id';
+      if parent_legacy_id is not null and not (node_map ? legacy_id) and node_map ? parent_legacy_id then
+        insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text,layout_x,layout_y,bend_x,bend_y) values(s.id,(node_item->>'group_no')::int,(branch_map->>(node_item->>'branch_legacy_id'))::uuid,(node_map->>parent_legacy_id)::uuid,btrim(node_item->>'text'),(node_item->>'layout_x')::double precision,(node_item->>'layout_y')::double precision,(node_item->>'bend_x')::double precision,(node_item->>'bend_y')::double precision) returning id into new_id;
+        node_map:=node_map||jsonb_build_object(legacy_id,new_id::text); made_count:=made_count+1;
+      end if;
+    end loop;
+    exit when made_count=0;
+  end loop;
+  select count(*) into restored_count from jsonb_object_keys(node_map);
+  if restored_count<>item_count then raise exception 'Zyklische oder unvollständige Knotenstruktur im Backup'; end if;
+  return jsonb_build_object('session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,'is_open',s.is_open,'created_at',s.created_at,'participants_can_export',s.participants_can_export,'root_position',s.root_position,'root_orientation',s.root_orientation),'moderator_token',tok);
+end $$;
+
 grant execute on function public.create_session(text,text,text[]) to anon, authenticated;
 grant execute on function public.get_session_public(text) to anon, authenticated;
 grant execute on function public.get_group_nodes(text,int) to anon, authenticated;
@@ -538,10 +635,13 @@ grant execute on function public.update_layout_item(text,text,text,uuid,double p
 grant execute on function public.update_layout_bend(text,text,text,uuid,double precision,double precision) to anon, authenticated;
 grant execute on function public.moderator_reparent_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.moderator_delete_node(text,text,uuid) to anon, authenticated;
+grant execute on function public.delete_session(text,text) to anon, authenticated;
+grant execute on function public.restore_session_from_backup(jsonb) to anon, authenticated;
 
 -- Hilfsfunktionen nicht direkt aus dem Browser aufrufen.
 revoke execute on function public.mm_make_code() from public, anon, authenticated;
 revoke execute on function public.mm_token_ok(uuid,text) from public, anon, authenticated;
+revoke execute on function public.cleanup_old_mindmap_sessions() from public, anon, authenticated;
 
 -- PostgREST soll die gerade angelegten RPCs ohne Wartezeit erkennen.
 notify pgrst, 'reload schema';

@@ -186,6 +186,20 @@ In der Referentenansicht gibt es unter **Zurücksetzen** den Button **„Auf Vor
 
 Der Vorgang ist absichtlich durch einen Bestätigungsdialog geschützt und kann nicht rückgängig gemacht werden. Vor einem Reset empfiehlt sich bei Bedarf ein JSON-Export.
 
+## 13. Session fortsetzen, sichern und beenden
+
+Nach dem Start speichert die Referentenansicht Session-Code und Moderator-Token nur im lokalen Browser. Nach einem Reload wird diese Session angeboten; F5 oder das Schließen des Browsers löscht keine Daten.
+
+Zum Abschluss bei Bedarf **JSON sichern** und dann **Session beenden** wählen. Nur dieser bewusst bestätigte Vorgang löscht Session, Äste und Beiträge sofort aus Supabase.
+
+## 14. JSON-Backup wiederherstellen
+
+Auf der Referenten-Startseite **JSON-Arbeitsstand importieren** wählen. Die Datei wird vor dem Import auf Format, Version, Feldgrenzen, Gruppen und Hierarchien geprüft. Der Restore erstellt immer eine neue Session mit neuem Code und neuem Moderator-Token.
+
+## 15. Automatische Bereinigung einrichten
+
+Führe nach `sql/schema.sql` einmal [`sql/cron.sql`](../sql/cron.sql) im Supabase SQL Editor aus. Der idempotente Supabase-Cron-Job löscht täglich um 03:30 UTC nur Sessions, die älter als 30 Tage sind.
+
 ---
 
 # Auswertung

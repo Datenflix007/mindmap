@@ -72,3 +72,21 @@ Die Page lädt `@supabase/supabase-js`, `qrcodejs` und `jsPDF` über jsDelivr. D
 ## Session zurücksetzen
 
 Die Referentenansicht enthält **„Auf Vorlage zurücksetzen“**. Beim JenaCraft-Template werden alle Beiträge gelöscht und Titel sowie Standardäste wiederhergestellt; bei eigenen Templates werden die Beiträge gelöscht und die Aststruktur bleibt erhalten.
+
+## Session-Lifecycle und temporäre Datenhaltung
+
+Supabase ist ausschließlich ein temporärer Kollaborationsspeicher. Beim Start einer Session merkt sich die Referentenansicht Session-Code und Moderator-Token ausschließlich im `localStorage` des verwendeten Browsers. Ein Reload, das Schließen des Browsers oder ein späteres Wiederöffnen erzeugt deshalb keine neue Session: Die Ansicht bietet an, die vorhandene Session fortzusetzen.
+
+Eine Session wird nur durch **„Session beenden“** unmittelbar aus Supabase entfernt. Der Dialog bietet vorher einen JSON-Export an. Die Löschung ist über den Moderator-Token abgesichert; durch die vorhandenen `ON DELETE CASCADE`-Beziehungen werden zugehörige Äste und Knoten mit entfernt. Ist ein lokaler Verweis nach einer manuellen Löschung oder Bereinigung nicht mehr gültig, kann er ohne technischen Fehler entfernt oder ein JSON-Backup importiert werden.
+
+## JSON-Backup und Wiederherstellung
+
+**JSON sichern** erzeugt ein vollständiges, wiederherstellbares Backup mit Titel, Vorlage, Layout, Exportrecht, Astfarben, Ästen, Knoten, Gruppen und Eltern-Kind-Beziehungen. Es enthält ausdrücklich **keinen** Moderator-Token, keinen Secret Hash, keine API-Schlüssel und keine anderen Zugangsdaten.
+
+Über **„JSON-Arbeitsstand importieren“** wird die Datei zunächst geprüft und mit Titel, Anzahl der Äste, Gruppen und Beiträge vorgeschaut. Beim Wiederherstellen entsteht immer eine neue Session mit neuem Code, neuem Moderator-Token und neuen Datenbank-IDs. Das verhindert, dass eine gelöschte Session technisch reaktiviert werden kann.
+
+## Automatische Bereinigung nach 30 Tagen
+
+Die Standard-Aufbewahrungsdauer beträgt **30 Tage**. `sql/schema.sql` definiert die nicht öffentlich erreichbare Funktion `cleanup_old_mindmap_sessions()`. Das ergänzende, separat auszuführende Skript [`sql/cron.sql`](sql/cron.sql) aktiviert Supabase Cron und plant die Bereinigung täglich um 03:30 UTC.
+
+Für eine andere Frist wird in `sql/schema.sql` der zentrale Ausdruck `interval '30 days'` angepasst, zum Beispiel zu `interval '7 days'`, `interval '14 days'` oder `interval '90 days'`, und anschließend das Schema erneut ausgeführt. Die reguläre, bewusste Session-Löschung ist unabhängig davon sofort wirksam. GitHub Actions ist höchstens ein Fallback: Es bräuchte einen privilegierten Supabase-Schlüssel als GitHub Secret und ist daher nicht der Standardweg.

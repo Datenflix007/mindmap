@@ -1,5 +1,18 @@
 # JenaCraft MindMap – Erweiterung
 
+## Session-Lifecycle, Backup und Datenbereinigung
+
+- [x] Bestehenden Session-Lifecycle und Kaskaden prüfen
+- [x] Reload-Wiederherstellung und aktive Session-Hinweis umsetzen
+- [x] Bewusstes Session-Ende mit sicherer Löschung umsetzen
+- [x] JSON-Backupformat vollständig machen
+- [x] JSON-Validierung und Vorschau umsetzen
+- [x] JSON-Restore mit neuen IDs und Parent-Mapping umsetzen
+- [x] Cleanup-RPC und idempotentes Supabase-Cron-Skript ergänzen
+- [x] Ablaufdatum und Fehlerfall gelöschter Session darstellen
+- [x] README und Setup-Dokumentation ergänzen
+- [x] Sicherheits- und Regressionstests durchführen
+
 - [x] Header umbenennen
 - [x] Session-Schema erweitern
 - [x] Moderator-RPC erweitern
