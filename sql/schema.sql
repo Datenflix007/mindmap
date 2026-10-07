@@ -416,6 +416,17 @@ begin
   if p_root_orientation not in ('horizontal','vertical') then
     raise exception 'Ungültige Titelorientierung';
   end if;
+  -- Changing the base layout restores the clean automatic arrangement and
+  -- removes manual positions and line bends saved for the old orientation.
+  if s.root_position is distinct from p_root_position
+     or s.root_orientation is distinct from p_root_orientation then
+    update public.mm_branches
+      set layout_x=null, layout_y=null, bend_x=null, bend_y=null
+      where session_id=s.id;
+    update public.mm_nodes
+      set layout_x=null, layout_y=null, bend_x=null, bend_y=null
+      where session_id=s.id;
+  end if;
   update public.mm_sessions
     set root_position=p_root_position,
         root_orientation=p_root_orientation,
