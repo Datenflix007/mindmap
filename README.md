@@ -67,3 +67,8 @@ Die Gruppennummer ist bewusst eine niederschwellige Workshop-Identität, kein si
 ## Hinweis zu externen Bibliotheken
 
 Die Page lädt `@supabase/supabase-js`, `qrcodejs` und `jsPDF` über jsDelivr. Damit müssen die Workshopgeräte lediglich Internetzugriff auf die GitHub Page und diese CDN-Ressourcen haben.
+
+
+## Session zurücksetzen
+
+Die Referentenansicht enthält **„Auf Vorlage zurücksetzen“**. Beim JenaCraft-Template werden alle Beiträge gelöscht und Titel sowie Standardäste wiederhergestellt; bei eigenen Templates werden die Beiträge gelöscht und die Aststruktur bleibt erhalten.

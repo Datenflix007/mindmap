@@ -175,6 +175,17 @@ Mit **„Session sperren“** können keine neuen Gruppenbeiträge mehr erstellt
 
 Zum Weiterarbeiten erneut **„Session öffnen“** wählen.
 
+## 12. Mindmap auf Vorlage zurücksetzen
+
+In der Referentenansicht gibt es unter **Zurücksetzen** den Button **„Auf Vorlage zurücksetzen“**.
+
+- Alle Gruppenbeiträge der aktuellen Session werden gelöscht.
+- Bei der Vorlage **JenaCraft · Must Haves / No Gos** werden zusätzlich der Titel und die vier Standardäste wiederhergestellt.
+- Bei einem **eigenen Template** werden nur die Beiträge gelöscht; die selbst definierte Aststruktur bleibt bestehen.
+- Die Session wird anschließend wieder geöffnet und `#Collect` zurückgesetzt.
+
+Der Vorgang ist absichtlich durch einen Bestätigungsdialog geschützt und kann nicht rückgängig gemacht werden. Vor einem Reset empfiehlt sich bei Bedarf ein JSON-Export.
+
 ---
 
 # Auswertung
