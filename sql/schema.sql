@@ -44,7 +44,17 @@ alter table public.mm_sessions
   add column if not exists root_orientation text not null default 'horizontal';
 
 alter table public.mm_branches
-  add column if not exists color text not null default '#eef8c9';
+  add column if not exists color text not null default '#eef8c9',
+  add column if not exists layout_x double precision,
+  add column if not exists layout_y double precision,
+  add column if not exists bend_x double precision,
+  add column if not exists bend_y double precision;
+
+alter table public.mm_nodes
+  add column if not exists layout_x double precision,
+  add column if not exists layout_y double precision,
+  add column if not exists bend_x double precision,
+  add column if not exists bend_y double precision;
 
 do $$
 begin
@@ -143,7 +153,7 @@ begin
   if not found then return null; end if;
   return jsonb_build_object(
     'session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at),
-    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
+    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
   );
 end $$;
 
@@ -160,7 +170,8 @@ begin
   return coalesce((
     select jsonb_agg(jsonb_build_object(
       'id',id,'branch_id',branch_id,'parent_id',parent_id,'group_no',group_no,
-      'text',text,'created_at',created_at,'updated_at',updated_at
+      'text',text,'created_at',created_at,'updated_at',updated_at,
+      'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y
     ) order by created_at)
     from public.mm_nodes where session_id=sid and group_no=p_group_no
   ),'[]'::jsonb);
@@ -238,10 +249,11 @@ begin
       'participants_can_export',s.participants_can_export,
       'root_position',s.root_position,'root_orientation',s.root_orientation
     ),
-    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
+    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
     'nodes',coalesce((select jsonb_agg(jsonb_build_object(
       'id',id,'branch_id',branch_id,'parent_id',parent_id,'group_no',group_no,
-      'text',text,'created_at',created_at,'updated_at',updated_at
+      'text',text,'created_at',created_at,'updated_at',updated_at,
+      'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y
     ) order by created_at) from public.mm_nodes where session_id=s.id),'[]'::jsonb)
   );
 end $$;
@@ -315,6 +327,68 @@ begin
         parent_id=case when id=p_node_id then null else parent_id end,
         updated_at=now()
     where id in (select id from subtree);
+end $$;
+
+create or replace function public.update_layout_item(
+  p_code text, p_moderator_token text, p_kind text, p_id uuid, p_x double precision, p_y double precision
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if p_x is null or p_y is null or abs(p_x)>10000 or abs(p_y)>10000 then raise exception 'Ungültige Position'; end if;
+  if p_kind='branch' then update public.mm_branches set layout_x=p_x,layout_y=p_y where id=p_id and session_id=s.id;
+  elsif p_kind='node' then update public.mm_nodes set layout_x=p_x,layout_y=p_y,updated_at=now() where id=p_id and session_id=s.id;
+  else raise exception 'Ungültiger Layouttyp'; end if;
+  if not found then raise exception 'Layoutobjekt nicht gefunden'; end if;
+end $$;
+
+create or replace function public.update_layout_bend(
+  p_code text, p_moderator_token text, p_kind text, p_id uuid, p_x double precision, p_y double precision
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if p_x is null or p_y is null or abs(p_x)>10000 or abs(p_y)>10000 then raise exception 'Ungültiger Knickpunkt'; end if;
+  if p_kind='branch' then update public.mm_branches set bend_x=p_x,bend_y=p_y where id=p_id and session_id=s.id;
+  elsif p_kind='node' then update public.mm_nodes set bend_x=p_x,bend_y=p_y,updated_at=now() where id=p_id and session_id=s.id;
+  else raise exception 'Ungültiger Layouttyp'; end if;
+  if not found then raise exception 'Verbindung nicht gefunden'; end if;
+end $$;
+
+create or replace function public.moderator_reparent_node(
+  p_code text, p_moderator_token text, p_node_id uuid, p_target_parent_id uuid
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions; target public.mm_nodes;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  select * into target from public.mm_nodes where id=p_target_parent_id and session_id=s.id;
+  if not found then raise exception 'Zielknoten nicht gefunden'; end if;
+  if p_node_id=p_target_parent_id then raise exception 'Ein Knoten kann nicht sein eigener Elternknoten sein'; end if;
+  if exists(with recursive subtree as (select id from public.mm_nodes where id=p_node_id and session_id=s.id union all select child.id from public.mm_nodes child join subtree tree on child.parent_id=tree.id) select 1 from subtree where id=p_target_parent_id) then raise exception 'Ein Knoten kann nicht in seine eigene Teilast verschoben werden'; end if;
+  if not exists(select 1 from public.mm_nodes where id=p_node_id and session_id=s.id) then raise exception 'Knoten nicht gefunden'; end if;
+  with recursive subtree as (
+    select id from public.mm_nodes where id=p_node_id and session_id=s.id
+    union all select child.id from public.mm_nodes child join subtree tree on child.parent_id=tree.id
+  )
+  update public.mm_nodes set branch_id=target.branch_id, parent_id=case when id=p_node_id then target.id else parent_id end, updated_at=now() where id in (select id from subtree);
+end $$;
+
+create or replace function public.moderator_delete_node(
+  p_code text, p_moderator_token text, p_node_id uuid
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  delete from public.mm_nodes where id=p_node_id and session_id=s.id;
+  if not found then raise exception 'Knoten nicht gefunden'; end if;
 end $$;
 
 -- Ausschließlich der Moderator einer Session darf Darstellungs- und Exportrechte ändern.
@@ -449,6 +523,10 @@ grant execute on function public.update_session_settings(text,text,text,text,boo
 grant execute on function public.update_branch_color(text,text,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_update_node(text,text,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_move_node(text,text,uuid,uuid) to anon, authenticated;
+grant execute on function public.update_layout_item(text,text,text,uuid,double precision,double precision) to anon, authenticated;
+grant execute on function public.update_layout_bend(text,text,text,uuid,double precision,double precision) to anon, authenticated;
+grant execute on function public.moderator_reparent_node(text,text,uuid,uuid) to anon, authenticated;
+grant execute on function public.moderator_delete_node(text,text,uuid) to anon, authenticated;
 
 -- Hilfsfunktionen nicht direkt aus dem Browser aufrufen.
 revoke execute on function public.mm_make_code() from public, anon, authenticated;
