@@ -36,6 +36,25 @@ create table if not exists public.mm_nodes (
 create index if not exists mm_nodes_session_idx on public.mm_nodes(session_id);
 create index if not exists mm_nodes_group_idx on public.mm_nodes(session_id, group_no);
 
+-- Diese Erweiterungen sind auch auf einer bereits vorhandenen Workshop-Datenbank
+-- erneut ausführbar und verändern keine bestehenden Inhalte.
+alter table public.mm_sessions
+  add column if not exists participants_can_export boolean not null default false,
+  add column if not exists root_position text not null default 'left',
+  add column if not exists root_orientation text not null default 'horizontal';
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname='mm_sessions_root_position_check') then
+    alter table public.mm_sessions add constraint mm_sessions_root_position_check
+      check (root_position in ('left','right','top','bottom','center'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname='mm_sessions_root_orientation_check') then
+    alter table public.mm_sessions add constraint mm_sessions_root_orientation_check
+      check (root_orientation in ('horizontal','vertical'));
+  end if;
+end $$;
+
 alter table public.mm_sessions enable row level security;
 alter table public.mm_branches enable row level security;
 alter table public.mm_nodes enable row level security;
@@ -99,7 +118,12 @@ begin
     end if;
   end loop;
   return jsonb_build_object(
-    'session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at),
+    'session',jsonb_build_object(
+      'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
+      'participants_can_export',s.participants_can_export,
+      'root_position',s.root_position,
+      'root_orientation',s.root_orientation
+    ),
     'moderator_token',tok
   );
 end $$;
@@ -207,13 +231,53 @@ begin
   return jsonb_build_object(
     'session',jsonb_build_object(
       'id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,
-      'is_open',s.is_open,'collected_at',s.collected_at,'created_at',s.created_at
+      'is_open',s.is_open,'collected_at',s.collected_at,'created_at',s.created_at,
+      'participants_can_export',s.participants_can_export,
+      'root_position',s.root_position,'root_orientation',s.root_orientation
     ),
     'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
     'nodes',coalesce((select jsonb_agg(jsonb_build_object(
       'id',id,'branch_id',branch_id,'parent_id',parent_id,'group_no',group_no,
       'text',text,'created_at',created_at,'updated_at',updated_at
     ) order by created_at) from public.mm_nodes where session_id=s.id),'[]'::jsonb)
+  );
+end $$;
+
+-- Ausschließlich der Moderator einer Session darf Darstellungs- und Exportrechte ändern.
+create or replace function public.update_session_settings(
+  p_code text,
+  p_moderator_token text,
+  p_root_position text,
+  p_root_orientation text,
+  p_participants_can_export boolean
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then
+    raise exception 'Moderator-Zugriff verweigert';
+  end if;
+  if p_root_position not in ('left','right','top','bottom','center') then
+    raise exception 'Ungültige Root-Position';
+  end if;
+  if p_root_orientation not in ('horizontal','vertical') then
+    raise exception 'Ungültige Titelorientierung';
+  end if;
+  update public.mm_sessions
+    set root_position=p_root_position,
+        root_orientation=p_root_orientation,
+        participants_can_export=coalesce(p_participants_can_export,false)
+    where id=s.id
+    returning * into s;
+  return jsonb_build_object(
+    'root_position',s.root_position,
+    'root_orientation',s.root_orientation,
+    'participants_can_export',s.participants_can_export
   );
 end $$;
 
@@ -307,6 +371,7 @@ grant execute on function public.moderator_snapshot(text,text) to anon, authenti
 grant execute on function public.set_session_open(text,text,boolean) to anon, authenticated;
 grant execute on function public.mark_collected(text,text) to anon, authenticated;
 grant execute on function public.reset_session_to_template(text,text) to anon, authenticated;
+grant execute on function public.update_session_settings(text,text,text,text,boolean) to anon, authenticated;
 
 -- Hilfsfunktionen nicht direkt aus dem Browser aufrufen.
 revoke execute on function public.mm_make_code() from public, anon, authenticated;
