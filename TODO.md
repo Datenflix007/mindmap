@@ -6,6 +6,7 @@
 - [x] Navigation der Referentenansicht fuer rechte Maustaste und Mausrad im Mindmap-Feld absichern. (Codepfad geprüft)
 - [x] Mausrad im Vollbildmodus zum Vergrößern und Verkleinern der Mindmap ergänzen. (Codepfad geprüft)
 - [x] Vollbild-Zoom am Mauszeiger verankern und die rechte Maustaste an den tatsächlichen sichtbaren Mindmap-Ausschnitt binden. (Codepfad geprüft)
+- [x] SVG beim Zoomen auf feste skalierte Pixelmaße setzen, damit Knoten und Verbindungen sichtbar wachsen oder schrumpfen. (Codepfad geprüft)
 - [x] Vollbildmodus über denselben Button wieder beenden können. (Codepfad geprüft)
 - [x] Referenten- und Teilnehmendenoberfläche mit klareren Arbeitsschritten, Zuständen und Hinweisen polieren. (statisch geprüft)
 - [x] JavaScript-Syntax, SVG-Renderer und Diff geprüft.
