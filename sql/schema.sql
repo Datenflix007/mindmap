@@ -56,6 +56,21 @@ alter table public.mm_nodes
   add column if not exists bend_x double precision,
   add column if not exists bend_y double precision;
 
+-- Gruppe 0 kennzeichnet Beiträge des Referenten. Gruppen 1–99 bleiben für
+-- Teilnehmende reserviert; vorhandene Beiträge bleiben unverändert gültig.
+do $$
+declare group_constraint text;
+begin
+  select conname into group_constraint
+    from pg_constraint
+    where conrelid='public.mm_nodes'::regclass and conname='mm_nodes_group_no_check';
+  if group_constraint is not null then
+    execute format('alter table public.mm_nodes drop constraint %I', group_constraint);
+  end if;
+  alter table public.mm_nodes add constraint mm_nodes_group_no_check
+    check (group_no between 0 and 99);
+end $$;
+
 do $$
 begin
   if not exists (select 1 from pg_constraint where conname='mm_sessions_root_position_check') then
@@ -278,6 +293,52 @@ begin
   if p_color !~ '^#[0-9A-Fa-f]{6}$' then raise exception 'Ungültige Astfarbe'; end if;
   update public.mm_branches set color=lower(p_color) where id=p_branch_id and session_id=s.id;
   if not found then raise exception 'Ast nicht gefunden'; end if;
+end $$;
+
+create or replace function public.moderator_add_branch(
+  p_code text,
+  p_moderator_token text,
+  p_title text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions; b public.mm_branches;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if p_title is null or btrim(p_title)='' then raise exception 'Asttitel fehlt'; end if;
+  insert into public.mm_branches(session_id,title,sort_order)
+  values(s.id,left(btrim(p_title),80),coalesce((select max(sort_order)+1 from public.mm_branches where session_id=s.id),0))
+  returning * into b;
+  return jsonb_build_object('id',b.id,'title',b.title,'sort_order',b.sort_order,'color',b.color);
+end $$;
+
+create or replace function public.moderator_add_node(
+  p_code text,
+  p_moderator_token text,
+  p_branch_id uuid,
+  p_parent_id uuid,
+  p_text text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions; n public.mm_nodes;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if p_text is null or btrim(p_text)='' then raise exception 'Text fehlt'; end if;
+  if not exists(select 1 from public.mm_branches where id=p_branch_id and session_id=s.id) then raise exception 'Ungültiger Ast'; end if;
+  if p_parent_id is not null and not exists(select 1 from public.mm_nodes where id=p_parent_id and session_id=s.id and branch_id=p_branch_id) then raise exception 'Ungültiger Elternknoten'; end if;
+  insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text)
+  values(s.id,0,p_branch_id,p_parent_id,left(btrim(p_text),240))
+  returning * into n;
+  return to_jsonb(n);
 end $$;
 
 create or replace function public.moderator_update_node(
@@ -587,7 +648,7 @@ begin
   for node_item in select value from jsonb_array_elements(p_backup->'nodes') loop
     legacy_id:=node_item->>'legacy_id'; branch_legacy_id:=node_item->>'branch_legacy_id'; parent_legacy_id:=node_item->>'legacy_parent_id';
     if jsonb_typeof(node_item)<>'object' or legacy_id is null or char_length(legacy_id) not between 1 and 120 or branch_legacy_id is null or node_seen ? legacy_id or not (branch_map ? branch_legacy_id) or jsonb_typeof(node_item->'text')<>'string' or char_length(btrim(node_item->>'text')) not between 1 and 240 or jsonb_typeof(node_item->'group_no')<>'number' or node_item->>'group_no' !~ '^[0-9]+$' then raise exception 'Ungültiger oder doppelter Knoten im Backup'; end if;
-    node_group:=(node_item->>'group_no')::int; if node_group not between 1 and 99 then raise exception 'Ungültige Gruppe im Backup'; end if;
+    node_group:=(node_item->>'group_no')::int; if node_group not between 0 and 99 then raise exception 'Ungültige Gruppe im Backup'; end if;
     if (node_item ? 'layout_x' and node_item->>'layout_x' is not null and (jsonb_typeof(node_item->'layout_x')<>'number' or abs((node_item->>'layout_x')::double precision)>10000)) or (node_item ? 'layout_y' and node_item->>'layout_y' is not null and (jsonb_typeof(node_item->'layout_y')<>'number' or abs((node_item->>'layout_y')::double precision)>10000)) or (node_item ? 'bend_x' and node_item->>'bend_x' is not null and (jsonb_typeof(node_item->'bend_x')<>'number' or abs((node_item->>'bend_x')::double precision)>10000)) or (node_item ? 'bend_y' and node_item->>'bend_y' is not null and (jsonb_typeof(node_item->'bend_y')<>'number' or abs((node_item->>'bend_y')::double precision)>10000)) then raise exception 'Ungültige Knotenposition'; end if;
     if parent_legacy_id is not null then
       select value into parent_item from jsonb_array_elements(p_backup->'nodes') where value->>'legacy_id'=parent_legacy_id limit 1;
@@ -629,6 +690,8 @@ grant execute on function public.mark_collected(text,text) to anon, authenticate
 grant execute on function public.reset_session_to_template(text,text) to anon, authenticated;
 grant execute on function public.update_session_settings(text,text,text,text,boolean) to anon, authenticated;
 grant execute on function public.update_branch_color(text,text,uuid,text) to anon, authenticated;
+grant execute on function public.moderator_add_branch(text,text,text) to anon, authenticated;
+grant execute on function public.moderator_add_node(text,text,uuid,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_update_node(text,text,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_move_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.update_layout_item(text,text,text,uuid,double precision,double precision) to anon, authenticated;
