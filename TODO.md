@@ -9,6 +9,7 @@
 - [x] SVG beim Zoomen auf feste skalierte Pixelmaße setzen, damit Knoten und Verbindungen sichtbar wachsen oder schrumpfen. (Codepfad geprüft)
 - [x] Panning-Ereignisse beim Ziehen mit rechter Maustaste über den sichtbaren Mindmap-Rand hinaus weiterverfolgen. (Codepfad geprüft)
 - [x] Mindmap in eine gepolsterte Arbeitsfläche einbetten, außerhalb des Vollbilds mit Rand und im Vollbild zentriert auf Bildschirmgröße. (Codepfad geprüft)
+- [x] SVG-Grenzen nach manuell verschobenen Knoten erweitern, damit Karten am Rand nicht abgeschnitten werden. (Codepfad geprüft)
 - [x] Vollbildmodus über denselben Button wieder beenden können. (Codepfad geprüft)
 - [x] Referenten- und Teilnehmendenoberfläche mit klareren Arbeitsschritten, Zuständen und Hinweisen polieren. (statisch geprüft)
 - [x] JavaScript-Syntax, SVG-Renderer und Diff geprüft.
