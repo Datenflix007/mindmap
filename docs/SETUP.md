@@ -140,7 +140,7 @@ Ablauf:
 1. Ast anklicken.
 2. Text eingeben.
 3. **„+ Hinzufügen“** drücken.
-4. Einen vorhandenen Knoten anklicken, um darunter einen Unterpunkt zu ergänzen.
+4. Einen Astkopf oder vorhandenen Knoten im Mindmap-Feld anklicken, um darunter einen Gedanken beziehungsweise Unterpunkt zu ergänzen.
 5. Eigene Knoten können bearbeitet oder gelöscht werden.
 
 Andere Gruppen sind in dieser Arbeitsphase nicht sichtbar.
