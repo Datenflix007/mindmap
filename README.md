@@ -18,6 +18,9 @@ Browserbasierte Gruppen-Mindmap für Workshops. Das Frontend läuft vollständig
 - `#Collect` für die zusammengeführte Gesamtmindmap
 - Gruppenlabels `G1`, `G2`, … in der Gesamtansicht
 - Live-Aktualisierung durch Polling
+- Teilnehmende können die Knoten ihrer eigenen Gruppe per Maus oder Touch verschieben
+- gemeinsame, synchronisierte Gesamtansicht für Referent und Teilnehmende
+- Schaltfläche „Automatisch anordnen“ in der Referentenansicht, um manuelle Positionen zurückzusetzen und Überlappungen zu beseitigen
 - Session sperren/öffnen
 - Auswertung pro Gruppe und Ast
 - Export als SVG, JPG, PDF und JSON
@@ -37,6 +40,8 @@ Kurzfassung:
 5. GitHub → Settings → Pages → Source: **GitHub Actions**
 6. Workflow abwarten und Page öffnen
 7. `moderator.html` öffnen und Session starten
+
+Wenn bereits eine ältere Datenbank verwendet wird, `sql/schema.sql` nach dem Update erneut vollständig im Supabase SQL Editor ausführen. Die Datei ergänzt die neuen RPC-Funktionen ohne bestehende Sessions zu löschen.
 
 ## Sicherheit
 
