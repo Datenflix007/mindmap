@@ -466,6 +466,30 @@ begin
   update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
 end $$;
 
+-- A deliberately conservative merge: the client only submits exact or
+-- curated-synonym leaf notes from one branch. The merged note records every
+-- contributing group and becomes a moderator-owned synthesis (group 0).
+create or replace function public.moderator_merge_nodes(
+  p_code text, p_moderator_token text, p_node_ids uuid[], p_text text
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions; target_branch uuid; target_parent uuid; actual_count int;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  if coalesce(cardinality(p_node_ids),0)<2 or cardinality(p_node_ids)>20 then raise exception 'Für einen Merge werden zwei bis zwanzig Knoten benötigt'; end if;
+  if btrim(coalesce(p_text,''))='' or length(btrim(p_text))>240 then raise exception 'Der zusammengefasste Text ist ungültig'; end if;
+  select branch_id,parent_id into target_branch,target_parent from public.mm_nodes where id=p_node_ids[1] and session_id=s.id;
+  if target_branch is null then raise exception 'Knoten nicht gefunden'; end if;
+  select count(*) into actual_count from public.mm_nodes where session_id=s.id and id=any(p_node_ids);
+  if actual_count<>cardinality(p_node_ids) then raise exception 'Mindestens ein Knoten gehört nicht zu dieser Session'; end if;
+  if exists(select 1 from public.mm_nodes where session_id=s.id and id=any(p_node_ids) and (branch_id is distinct from target_branch or parent_id is distinct from target_parent)) then raise exception 'Nur Knoten derselben Ebene und desselben Astes können zusammengeführt werden'; end if;
+  if exists(select 1 from public.mm_nodes where session_id=s.id and parent_id=any(p_node_ids)) then raise exception 'Knoten mit Unterpunkten können nicht automatisch zusammengeführt werden'; end if;
+  insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text)
+    values(s.id,0,target_branch,target_parent,left(btrim(p_text),240));
+  delete from public.mm_nodes where session_id=s.id and id=any(p_node_ids);
+end $$;
+
 create or replace function public.update_layout_bend(
   p_code text, p_moderator_token text, p_kind text, p_id uuid, p_x double precision, p_y double precision
 )
@@ -760,6 +784,7 @@ grant execute on function public.update_layout_item(text,text,text,uuid,double p
 grant execute on function public.update_group_layout_item(text,int,uuid,double precision,double precision) to anon, authenticated;
 grant execute on function public.update_layout_bend(text,text,text,uuid,double precision,double precision) to anon, authenticated;
 grant execute on function public.moderator_auto_arrange(text,text) to anon, authenticated;
+grant execute on function public.moderator_merge_nodes(text,text,uuid[],text) to anon, authenticated;
 grant execute on function public.moderator_reparent_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.moderator_delete_node(text,text,uuid) to anon, authenticated;
 grant execute on function public.delete_session(text,text) to anon, authenticated;
