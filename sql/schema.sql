@@ -41,7 +41,8 @@ create index if not exists mm_nodes_group_idx on public.mm_nodes(session_id, gro
 alter table public.mm_sessions
   add column if not exists participants_can_export boolean not null default false,
   add column if not exists root_position text not null default 'left',
-  add column if not exists root_orientation text not null default 'horizontal';
+  add column if not exists root_orientation text not null default 'horizontal',
+  add column if not exists normalization_rules jsonb not null default '[]'::jsonb;
 
 alter table public.mm_branches
   add column if not exists color text not null default '#eef8c9',
@@ -119,6 +120,30 @@ as $$
       and moderator_secret_hash = encode(extensions.digest(coalesce(p_token,''),'sha256'),'hex')
   );
 $$;
+
+-- Regeln werden absichtlich klein und streng strukturiert gespeichert: Ein
+-- Hauptbegriff mit bewusst kuratierten Varianten, nie ein automatischer
+-- Fuzzy-Match über beliebige Beiträge.
+create or replace function public.mm_normalization_rules_valid(p_rules jsonb)
+returns boolean
+language plpgsql
+immutable
+as $$
+declare rule jsonb; variant jsonb;
+begin
+  if jsonb_typeof(p_rules)<>'array' or jsonb_array_length(p_rules)>60 then return false; end if;
+  for rule in select value from jsonb_array_elements(p_rules) loop
+    if jsonb_typeof(rule)<>'object'
+       or jsonb_typeof(rule->'canonical')<>'string'
+       or char_length(btrim(rule->>'canonical')) not between 1 and 120
+       or jsonb_typeof(rule->'aliases')<>'array'
+       or jsonb_array_length(rule->'aliases') not between 1 and 24 then return false; end if;
+    for variant in select value from jsonb_array_elements(rule->'aliases') loop
+      if jsonb_typeof(variant)<>'string' or char_length(btrim(variant#>>'{}')) not between 1 and 120 then return false; end if;
+    end loop;
+  end loop;
+  return true;
+end $$;
 
 create or replace function public.create_session(p_title text, p_template_key text, p_branch_titles text[])
 returns jsonb
@@ -294,7 +319,8 @@ begin
       'id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,
       'is_open',s.is_open,'collected_at',s.collected_at,'created_at',s.created_at,
       'participants_can_export',s.participants_can_export,
-      'root_position',s.root_position,'root_orientation',s.root_orientation
+      'root_position',s.root_position,'root_orientation',s.root_orientation,
+      'normalization_rules',s.normalization_rules
     ),
     'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
     'nodes',coalesce((select jsonb_agg(jsonb_build_object(
@@ -303,6 +329,29 @@ begin
       'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y
     ) order by created_at) from public.mm_nodes where session_id=s.id),'[]'::jsonb)
   );
+end $$;
+
+create or replace function public.moderator_update_normalization_rules(
+  p_code text,
+  p_moderator_token text,
+  p_rules jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then
+    raise exception 'Moderator-Zugriff verweigert';
+  end if;
+  if not public.mm_normalization_rules_valid(p_rules) then
+    raise exception 'Die Begriffsliste ist ungültig';
+  end if;
+  update public.mm_sessions set normalization_rules=p_rules where id=s.id returning * into s;
+  return s.normalization_rules;
 end $$;
 
 create or replace function public.update_branch_color(
@@ -716,11 +765,12 @@ begin
   if jsonb_typeof(mindmap)<>'object' or jsonb_typeof(settings)<>'object' or jsonb_typeof(p_backup->'branches')<>'array' or jsonb_typeof(p_backup->'nodes')<>'array' then raise exception 'Unvollständiges Mindmap-Backup'; end if;
   if jsonb_typeof(mindmap->'title')<>'string' or char_length(btrim(mindmap->>'title')) not between 1 and 120 then raise exception 'Ungültiger Mindmap-Titel'; end if;
   if coalesce(mindmap->>'root_position','') not in ('left','right','top','bottom','center') or coalesce(mindmap->>'root_orientation','') not in ('horizontal','vertical') or jsonb_typeof(settings->'participants_can_export')<>'boolean' then raise exception 'Ungültige Mindmap-Einstellungen'; end if;
+  if settings ? 'normalization_rules' and not public.mm_normalization_rules_valid(settings->'normalization_rules') then raise exception 'Ungültige Begriffsliste im Backup'; end if;
   if jsonb_array_length(p_backup->'branches')<1 then raise exception 'Mindestens ein Ast wird benötigt'; end if;
 
   tok:=encode(extensions.gen_random_bytes(24),'hex');
-  insert into public.mm_sessions(code,title,template_key,moderator_secret_hash,participants_can_export,root_position,root_orientation)
-  values(public.mm_make_code(),left(btrim(mindmap->>'title'),120),left(coalesce(nullif(btrim(mindmap->>'template_key'),''),'custom'),80),encode(extensions.digest(tok,'sha256'),'hex'),(settings->>'participants_can_export')::boolean,mindmap->>'root_position',mindmap->>'root_orientation') returning * into s;
+  insert into public.mm_sessions(code,title,template_key,moderator_secret_hash,participants_can_export,root_position,root_orientation,normalization_rules)
+  values(public.mm_make_code(),left(btrim(mindmap->>'title'),120),left(coalesce(nullif(btrim(mindmap->>'template_key'),''),'custom'),80),encode(extensions.digest(tok,'sha256'),'hex'),(settings->>'participants_can_export')::boolean,mindmap->>'root_position',mindmap->>'root_orientation',coalesce(settings->'normalization_rules','[]'::jsonb)) returning * into s;
   for branch_item in select value from jsonb_array_elements(p_backup->'branches') loop
     legacy_id:=branch_item->>'legacy_id';
     if jsonb_typeof(branch_item)<>'object' or legacy_id is null or char_length(legacy_id) not between 1 and 120 or branch_map ? legacy_id or jsonb_typeof(branch_item->'title')<>'string' or char_length(btrim(branch_item->>'title')) not between 1 and 80 then raise exception 'Ungültiger oder doppelter Ast im Backup'; end if;
@@ -760,7 +810,7 @@ begin
   end loop;
   select count(*) into restored_count from jsonb_object_keys(node_map);
   if restored_count<>item_count then raise exception 'Zyklische oder unvollständige Knotenstruktur im Backup'; end if;
-  return jsonb_build_object('session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,'is_open',s.is_open,'created_at',s.created_at,'participants_can_export',s.participants_can_export,'root_position',s.root_position,'root_orientation',s.root_orientation),'moderator_token',tok);
+  return jsonb_build_object('session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,'is_open',s.is_open,'created_at',s.created_at,'participants_can_export',s.participants_can_export,'root_position',s.root_position,'root_orientation',s.root_orientation,'normalization_rules',s.normalization_rules),'moderator_token',tok);
 end $$;
 
 grant execute on function public.create_session(text,text,text[]) to anon, authenticated;
@@ -785,6 +835,7 @@ grant execute on function public.update_group_layout_item(text,int,uuid,double p
 grant execute on function public.update_layout_bend(text,text,text,uuid,double precision,double precision) to anon, authenticated;
 grant execute on function public.moderator_auto_arrange(text,text) to anon, authenticated;
 grant execute on function public.moderator_merge_nodes(text,text,uuid[],text) to anon, authenticated;
+grant execute on function public.moderator_update_normalization_rules(text,text,jsonb) to anon, authenticated;
 grant execute on function public.moderator_reparent_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.moderator_delete_node(text,text,uuid) to anon, authenticated;
 grant execute on function public.delete_session(text,text) to anon, authenticated;
@@ -793,6 +844,7 @@ grant execute on function public.restore_session_from_backup(jsonb) to anon, aut
 -- Hilfsfunktionen nicht direkt aus dem Browser aufrufen.
 revoke execute on function public.mm_make_code() from public, anon, authenticated;
 revoke execute on function public.mm_token_ok(uuid,text) from public, anon, authenticated;
+revoke execute on function public.mm_normalization_rules_valid(jsonb) from public, anon, authenticated;
 revoke execute on function public.cleanup_old_mindmap_sessions() from public, anon, authenticated;
 
 -- PostgREST soll die gerade angelegten RPCs ohne Wartezeit erkennen.
