@@ -40,6 +40,11 @@ create index if not exists mm_nodes_group_idx on public.mm_nodes(session_id, gro
 -- erneut ausführbar und verändern keine bestehenden Inhalte.
 alter table public.mm_sessions
   add column if not exists participants_can_export boolean not null default false,
+  add column if not exists participants_see_all_groups boolean not null default false,
+  add column if not exists participants_can_change_group boolean not null default true,
+  add column if not exists participants_can_edit boolean not null default true,
+  add column if not exists participants_can_delete boolean not null default true,
+  add column if not exists layout_revision bigint not null default 0,
   add column if not exists root_position text not null default 'left',
   add column if not exists root_orientation text not null default 'horizontal',
   add column if not exists normalization_rules jsonb not null default '[]'::jsonb;
@@ -174,6 +179,10 @@ begin
     'session',jsonb_build_object(
       'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
       'participants_can_export',s.participants_can_export,
+      'participants_see_all_groups',s.participants_see_all_groups,
+      'participants_can_change_group',s.participants_can_change_group,
+      'participants_can_edit',s.participants_can_edit,
+      'participants_can_delete',s.participants_can_delete,
       'root_position',s.root_position,
       'root_orientation',s.root_orientation
     ),
@@ -195,14 +204,18 @@ begin
     'session',jsonb_build_object(
       'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
       'participants_can_export',s.participants_can_export,
+      'participants_see_all_groups',s.participants_see_all_groups,
+      'participants_can_change_group',s.participants_can_change_group,
+      'participants_can_edit',s.participants_can_edit,
+      'participants_can_delete',s.participants_can_delete,
       'root_position',s.root_position,'root_orientation',s.root_orientation
     ),
     'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
   );
 end $$;
 
--- Gemeinsamer Lesestand für Teilnehmende: Damit alle dieselbe räumliche
--- Anordnung sehen, enthält die Teilnehmeransicht die gesamte Mindmap. Schreibrechte
+-- Gemeinsamer Lesestand für Teilnehmende. Die Ansicht blendet – abhängig von
+-- der Session-Einstellung – alle oder nur die eigene Gruppe ein. Schreibrechte
 -- bleiben über die gruppengebundenen Funktionen strikt auf die eigene Gruppe begrenzt.
 create or replace function public.get_participant_snapshot(p_code text)
 returns jsonb
@@ -218,6 +231,11 @@ begin
     'session',jsonb_build_object(
       'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
       'participants_can_export',s.participants_can_export,
+      'participants_see_all_groups',s.participants_see_all_groups,
+      'participants_can_change_group',s.participants_can_change_group,
+      'participants_can_edit',s.participants_can_edit,
+      'participants_can_delete',s.participants_can_delete,
+      'layout_revision',s.layout_revision,
       'root_position',s.root_position,'root_orientation',s.root_orientation
     ),
     'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
@@ -269,6 +287,16 @@ begin
   ) then raise exception 'Ungültiger Elternknoten'; end if;
   insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text)
   values(s.id,p_group_no,p_branch_id,p_parent_id,left(btrim(p_text),240)) returning * into n;
+  -- A new contribution changes the shared composition. Clearing manual
+  -- overrides lets every participant and the moderator calculate the same
+  -- clean, collision-free overall layout from the fresh snapshot.
+  update public.mm_branches
+    set layout_x=null,layout_y=null,bend_x=null,bend_y=null
+    where session_id=s.id;
+  update public.mm_nodes
+    set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now()
+    where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
   return to_jsonb(n);
 end $$;
 
@@ -278,14 +306,15 @@ language plpgsql
 security definer
 set search_path=public, extensions
 as $$
-declare sid uuid; open_state boolean;
+declare s public.mm_sessions;
 begin
-  select id,is_open into sid,open_state from public.mm_sessions where code=upper(btrim(p_code));
-  if sid is null then raise exception 'Session nicht gefunden'; end if;
-  if not open_state then raise exception 'Session nicht offen'; end if;
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found then raise exception 'Session nicht gefunden'; end if;
+  if not s.is_open then raise exception 'Session nicht offen'; end if;
+  if not s.participants_can_edit then raise exception 'Bearbeiten ist für Teilnehmende deaktiviert'; end if;
   if p_text is null or btrim(p_text)='' then raise exception 'Text fehlt'; end if;
   update public.mm_nodes set text=left(btrim(p_text),240),updated_at=now()
-  where id=p_node_id and session_id=sid and group_no=p_group_no;
+  where id=p_node_id and session_id=s.id and group_no=p_group_no;
   if not found then raise exception 'Knoten nicht gefunden'; end if;
 end $$;
 
@@ -295,13 +324,22 @@ language plpgsql
 security definer
 set search_path=public, extensions
 as $$
-declare sid uuid; open_state boolean;
+declare s public.mm_sessions; target_parent_id uuid;
 begin
-  select id,is_open into sid,open_state from public.mm_sessions where code=upper(btrim(p_code));
-  if sid is null then raise exception 'Session nicht gefunden'; end if;
-  if not open_state then raise exception 'Session nicht offen'; end if;
-  delete from public.mm_nodes where id=p_node_id and session_id=sid and group_no=p_group_no;
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found then raise exception 'Session nicht gefunden'; end if;
+  if not s.is_open then raise exception 'Session nicht offen'; end if;
+  if not s.participants_can_delete then raise exception 'Löschen ist für Teilnehmende deaktiviert'; end if;
+  select n.parent_id into target_parent_id from public.mm_nodes n
+    where n.id=p_node_id and n.session_id=s.id and n.group_no=p_group_no;
   if not found then raise exception 'Knoten nicht gefunden'; end if;
+  update public.mm_nodes set parent_id=target_parent_id,updated_at=now()
+    where session_id=s.id and group_no=p_group_no and parent_id=p_node_id;
+  delete from public.mm_nodes where id=p_node_id and session_id=s.id and group_no=p_group_no;
+  if not found then raise exception 'Knoten nicht gefunden'; end if;
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 create or replace function public.moderator_snapshot(p_code text,p_moderator_token text)
@@ -319,6 +357,10 @@ begin
       'id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,
       'is_open',s.is_open,'collected_at',s.collected_at,'created_at',s.created_at,
       'participants_can_export',s.participants_can_export,
+      'participants_see_all_groups',s.participants_see_all_groups,
+      'participants_can_change_group',s.participants_can_change_group,
+      'participants_can_edit',s.participants_can_edit,
+      'participants_can_delete',s.participants_can_delete,
       'root_position',s.root_position,'root_orientation',s.root_orientation,
       'normalization_rules',s.normalization_rules
     ),
@@ -394,6 +436,11 @@ begin
   insert into public.mm_branches(session_id,title,sort_order)
   values(s.id,left(btrim(p_title),80),coalesce((select max(sort_order)+1 from public.mm_branches where session_id=s.id),0))
   returning * into b;
+  -- A new root branch changes every sector of the automatic layout. Discard
+  -- manual coordinates so the whole map is rebuilt as one clean, disjoint tree.
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
   return jsonb_build_object('id',b.id,'title',b.title,'sort_order',b.sort_order,'color',b.color);
 end $$;
 
@@ -419,6 +466,9 @@ begin
   insert into public.mm_nodes(session_id,group_no,branch_id,parent_id,text)
   values(s.id,0,p_branch_id,p_parent_id,left(btrim(p_text),240))
   returning * into n;
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
   return to_jsonb(n);
 end $$;
 
@@ -469,6 +519,9 @@ begin
         parent_id=case when id=p_node_id then null else parent_id end,
         updated_at=now()
     where id in (select id from subtree);
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 create or replace function public.update_layout_item(
@@ -484,6 +537,7 @@ begin
   elsif p_kind='node' then update public.mm_nodes set layout_x=p_x,layout_y=p_y,updated_at=now() where id=p_id and session_id=s.id;
   else raise exception 'Ungültiger Layouttyp'; end if;
   if not found then raise exception 'Layoutobjekt nicht gefunden'; end if;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 -- Teilnehmende dürfen ausschließlich die Position ihrer eigenen Knoten ändern.
@@ -501,6 +555,7 @@ begin
   update public.mm_nodes set layout_x=p_x,layout_y=p_y,updated_at=now()
     where id=p_node_id and session_id=s.id and group_no=p_group_no;
   if not found then raise exception 'Knoten nicht gefunden oder nicht in eurer Gruppe'; end if;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 -- Entfernt gespeicherte manuelle Eingriffe. Das Frontend berechnet anschließend
@@ -513,6 +568,7 @@ begin
   if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
   update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
   update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 -- A deliberately conservative merge: the client only submits exact or
@@ -552,6 +608,7 @@ begin
   elsif p_kind='node' then update public.mm_nodes set bend_x=p_x,bend_y=p_y,updated_at=now() where id=p_id and session_id=s.id;
   else raise exception 'Ungültiger Layouttyp'; end if;
   if not found then raise exception 'Verbindung nicht gefunden'; end if;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 create or replace function public.moderator_reparent_node(
@@ -572,18 +629,27 @@ begin
     union all select child.id from public.mm_nodes child join subtree tree on child.parent_id=tree.id
   )
   update public.mm_nodes set branch_id=target.branch_id, parent_id=case when id=p_node_id then target.id else parent_id end, updated_at=now() where id in (select id from subtree);
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 create or replace function public.moderator_delete_node(
   p_code text, p_moderator_token text, p_node_id uuid
 )
 returns void language plpgsql security definer set search_path=public, extensions as $$
-declare s public.mm_sessions;
+declare s public.mm_sessions; target_parent_id uuid;
 begin
   select * into s from public.mm_sessions where code=upper(btrim(p_code));
   if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  select parent_id into target_parent_id from public.mm_nodes where id=p_node_id and session_id=s.id;
+  if not found then raise exception 'Knoten nicht gefunden'; end if;
+  update public.mm_nodes set parent_id=target_parent_id,updated_at=now() where parent_id=p_node_id and session_id=s.id;
   delete from public.mm_nodes where id=p_node_id and session_id=s.id;
   if not found then raise exception 'Knoten nicht gefunden'; end if;
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
+  update public.mm_sessions set layout_revision=layout_revision+1 where id=s.id;
 end $$;
 
 -- Ausschließlich der Moderator einer Session darf Darstellungs- und Exportrechte ändern.
@@ -625,13 +691,75 @@ begin
   update public.mm_sessions
     set root_position=p_root_position,
         root_orientation=p_root_orientation,
-        participants_can_export=coalesce(p_participants_can_export,false)
+        participants_can_export=coalesce(p_participants_can_export,false),
+        layout_revision=layout_revision+case when s.root_position is distinct from p_root_position or s.root_orientation is distinct from p_root_orientation then 1 else 0 end
     where id=s.id
     returning * into s;
   return jsonb_build_object(
     'root_position',s.root_position,
     'root_orientation',s.root_orientation,
     'participants_can_export',s.participants_can_export
+  );
+end $$;
+
+-- This setting deliberately has its own RPC so existing installations keep
+-- their compatible layout-settings function signature.
+create or replace function public.update_participant_view_settings(
+  p_code text,
+  p_moderator_token text,
+  p_participants_see_all_groups boolean
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then
+    raise exception 'Moderator-Zugriff verweigert';
+  end if;
+  update public.mm_sessions
+    set participants_see_all_groups=coalesce(p_participants_see_all_groups,false)
+    where id=s.id
+    returning * into s;
+  return jsonb_build_object('participants_see_all_groups',s.participants_see_all_groups);
+end $$;
+
+-- Teilnehmerrechte werden getrennt von den Layout-Einstellungen gespeichert,
+-- damit eine Änderung keine Kamera- oder Layout-Neuberechnung auslöst.
+create or replace function public.update_participant_permissions(
+  p_code text,
+  p_moderator_token text,
+  p_participants_see_all_groups boolean,
+  p_participants_can_change_group boolean,
+  p_participants_can_edit boolean,
+  p_participants_can_delete boolean
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then
+    raise exception 'Moderator-Zugriff verweigert';
+  end if;
+  update public.mm_sessions
+    set participants_see_all_groups=coalesce(p_participants_see_all_groups,false),
+        participants_can_change_group=coalesce(p_participants_can_change_group,true),
+        participants_can_edit=coalesce(p_participants_can_edit,true),
+        participants_can_delete=coalesce(p_participants_can_delete,true)
+    where id=s.id
+    returning * into s;
+  return jsonb_build_object(
+    'participants_see_all_groups',s.participants_see_all_groups,
+    'participants_can_change_group',s.participants_can_change_group,
+    'participants_can_edit',s.participants_can_edit,
+    'participants_can_delete',s.participants_can_delete
   );
 end $$;
 
@@ -764,13 +892,13 @@ begin
   mindmap:=p_backup->'mindmap'; settings:=p_backup->'settings';
   if jsonb_typeof(mindmap)<>'object' or jsonb_typeof(settings)<>'object' or jsonb_typeof(p_backup->'branches')<>'array' or jsonb_typeof(p_backup->'nodes')<>'array' then raise exception 'Unvollständiges Mindmap-Backup'; end if;
   if jsonb_typeof(mindmap->'title')<>'string' or char_length(btrim(mindmap->>'title')) not between 1 and 120 then raise exception 'Ungültiger Mindmap-Titel'; end if;
-  if coalesce(mindmap->>'root_position','') not in ('left','right','top','bottom','center') or coalesce(mindmap->>'root_orientation','') not in ('horizontal','vertical') or jsonb_typeof(settings->'participants_can_export')<>'boolean' then raise exception 'Ungültige Mindmap-Einstellungen'; end if;
+  if coalesce(mindmap->>'root_position','') not in ('left','right','top','bottom','center') or coalesce(mindmap->>'root_orientation','') not in ('horizontal','vertical') or jsonb_typeof(settings->'participants_can_export')<>'boolean' or (settings ? 'participants_see_all_groups' and jsonb_typeof(settings->'participants_see_all_groups')<>'boolean') or (settings ? 'participants_can_change_group' and jsonb_typeof(settings->'participants_can_change_group')<>'boolean') or (settings ? 'participants_can_edit' and jsonb_typeof(settings->'participants_can_edit')<>'boolean') or (settings ? 'participants_can_delete' and jsonb_typeof(settings->'participants_can_delete')<>'boolean') then raise exception 'Ungültige Mindmap-Einstellungen'; end if;
   if settings ? 'normalization_rules' and not public.mm_normalization_rules_valid(settings->'normalization_rules') then raise exception 'Ungültige Begriffsliste im Backup'; end if;
   if jsonb_array_length(p_backup->'branches')<1 then raise exception 'Mindestens ein Ast wird benötigt'; end if;
 
   tok:=encode(extensions.gen_random_bytes(24),'hex');
-  insert into public.mm_sessions(code,title,template_key,moderator_secret_hash,participants_can_export,root_position,root_orientation,normalization_rules)
-  values(public.mm_make_code(),left(btrim(mindmap->>'title'),120),left(coalesce(nullif(btrim(mindmap->>'template_key'),''),'custom'),80),encode(extensions.digest(tok,'sha256'),'hex'),(settings->>'participants_can_export')::boolean,mindmap->>'root_position',mindmap->>'root_orientation',coalesce(settings->'normalization_rules','[]'::jsonb)) returning * into s;
+  insert into public.mm_sessions(code,title,template_key,moderator_secret_hash,participants_can_export,participants_see_all_groups,participants_can_change_group,participants_can_edit,participants_can_delete,root_position,root_orientation,normalization_rules)
+  values(public.mm_make_code(),left(btrim(mindmap->>'title'),120),left(coalesce(nullif(btrim(mindmap->>'template_key'),''),'custom'),80),encode(extensions.digest(tok,'sha256'),'hex'),(settings->>'participants_can_export')::boolean,coalesce((settings->>'participants_see_all_groups')::boolean,false),coalesce((settings->>'participants_can_change_group')::boolean,true),coalesce((settings->>'participants_can_edit')::boolean,true),coalesce((settings->>'participants_can_delete')::boolean,true),mindmap->>'root_position',mindmap->>'root_orientation',coalesce(settings->'normalization_rules','[]'::jsonb)) returning * into s;
   for branch_item in select value from jsonb_array_elements(p_backup->'branches') loop
     legacy_id:=branch_item->>'legacy_id';
     if jsonb_typeof(branch_item)<>'object' or legacy_id is null or char_length(legacy_id) not between 1 and 120 or branch_map ? legacy_id or jsonb_typeof(branch_item->'title')<>'string' or char_length(btrim(branch_item->>'title')) not between 1 and 80 then raise exception 'Ungültiger oder doppelter Ast im Backup'; end if;
@@ -810,7 +938,7 @@ begin
   end loop;
   select count(*) into restored_count from jsonb_object_keys(node_map);
   if restored_count<>item_count then raise exception 'Zyklische oder unvollständige Knotenstruktur im Backup'; end if;
-  return jsonb_build_object('session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,'is_open',s.is_open,'created_at',s.created_at,'participants_can_export',s.participants_can_export,'root_position',s.root_position,'root_orientation',s.root_orientation,'normalization_rules',s.normalization_rules),'moderator_token',tok);
+  return jsonb_build_object('session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'template_key',s.template_key,'is_open',s.is_open,'created_at',s.created_at,'participants_can_export',s.participants_can_export,'participants_see_all_groups',s.participants_see_all_groups,'participants_can_change_group',s.participants_can_change_group,'participants_can_edit',s.participants_can_edit,'participants_can_delete',s.participants_can_delete,'root_position',s.root_position,'root_orientation',s.root_orientation,'normalization_rules',s.normalization_rules),'moderator_token',tok);
 end $$;
 
 grant execute on function public.create_session(text,text,text[]) to anon, authenticated;
@@ -825,6 +953,8 @@ grant execute on function public.set_session_open(text,text,boolean) to anon, au
 grant execute on function public.mark_collected(text,text) to anon, authenticated;
 grant execute on function public.reset_session_to_template(text,text) to anon, authenticated;
 grant execute on function public.update_session_settings(text,text,text,text,boolean) to anon, authenticated;
+grant execute on function public.update_participant_view_settings(text,text,boolean) to anon, authenticated;
+grant execute on function public.update_participant_permissions(text,text,boolean,boolean,boolean,boolean) to anon, authenticated;
 grant execute on function public.update_branch_color(text,text,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_add_branch(text,text,text) to anon, authenticated;
 grant execute on function public.moderator_add_node(text,text,uuid,uuid,text) to anon, authenticated;

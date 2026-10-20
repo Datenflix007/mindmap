@@ -23,7 +23,7 @@ window.MM = (() => {
     const children=new Map();nodes.forEach(n=>{const key=n.parent_id?String(n.parent_id):'';if(!children.has(key))children.set(key,[]);children.get(key).push(n)});
     const childOf=n=>children.get(String(n.id))||[], rootsFor=b=>nodes.filter(n=>String(n.branch_id)===String(b.id)&&!n.parent_id), metrics=new Map(nodes.map(n=>[String(n.id),measure(n.text)]));
     const depthOf=n=>childOf(n).length?1+Math.max(...childOf(n).map(depthOf)):0,maxDepth=Math.max(0,...nodes.map(depthOf));
-    const positions=new Map(),branchPositions=new Map(),crossCache=new Map();
+    const positions=new Map(),branchPositions=new Map(),nodeSectors=new Map(),crossCache=new Map();
     const hasPoint=item=>item?.layout_x!==null&&item?.layout_x!==undefined&&item?.layout_y!==null&&item?.layout_y!==undefined&&Number.isFinite(Number(item.layout_x))&&Number.isFinite(Number(item.layout_y));
     const subtreeCross=(n,horizontal)=>{const key=`${horizontal?'h':'v'}:${n.id}`;if(crossCache.has(key))return crossCache.get(key);const own=horizontal?metrics.get(String(n.id)).h:metrics.get(String(n.id)).w,kids=childOf(n),value=kids.length?Math.max(own,kids.reduce((sum,kid)=>sum+subtreeCross(kid,horizontal),0)+gap*(kids.length-1)):own;crossCache.set(key,value);return value;};
     const forestCross=(forest,horizontal)=>forest.length?forest.reduce((sum,n)=>sum+subtreeCross(n,horizontal),0)+gap*(forest.length-1):0;
@@ -38,11 +38,19 @@ window.MM = (() => {
       branchData.forEach((b,i)=>{const forest=rootsFor(b),lane=lanes[i],x=cursor+lane/2;branchPositions.set(String(b.id),{x,y:branchY});let treeCursor=cursor+(lane-forestCross(forest,false))/2;forest.forEach(n=>{placeTree(n,0,branchY,treeCursor,false,1);treeCursor+=subtreeCross(n,false)+gap});cursor+=lane});rootPos={x:W/2,y:pad+rootBox.h/2};
       if(rootPosition==='bottom'){rootPos.y=H-rootPos.y;branchPositions.forEach(p=>p.y=H-p.y);positions.forEach(p=>p.y=H-p.y)}
     } else {
-      // Compact radial mindmap: the branches grow in soft arcs around the
-      // centre. Siblings use small radial rings instead of one long column,
-      // keeping the composition dense and organic even with many ideas.
-      rootPos={x:0,y:0};const branchCount=Math.max(branchData.length,1),sector=Math.PI*2/branchCount,radius=Math.max(330,rootBox.w/2+190),polar=(distance,angle)=>({x:Math.cos(angle)*distance,y:Math.sin(angle)*distance}),slotCount=count=>Math.min(4,Math.max(2,Math.ceil(Math.sqrt(count||1))));
-      branchData.forEach((b,index)=>{const angle=-Math.PI/2+sector*index,bp=polar(radius,angle),forest=rootsFor(b);branchPositions.set(String(b.id),bp);const placeSprig=(n,distance,nodeAngle,depth)=>{positions.set(String(n.id),polar(distance,nodeAngle));const kids=childOf(n),columns=slotCount(kids.length),mid=(columns-1)/2,spread=Math.min(.52,.24+columns*.075);kids.forEach((kid,kidIndex)=>{const ring=Math.floor(kidIndex/columns),slot=kidIndex%columns,childAngle=nodeAngle+(slot-mid)*spread+(ring%2?.018:-.018),childDistance=distance+214+ring*146+(slot%2?11:0);placeSprig(kid,childDistance,childAngle,depth+1)})};const columns=slotCount(forest.length),mid=(columns-1)/2,spread=Math.min(.60,.28+columns*.08);forest.forEach((n,nodeIndex)=>{const ring=Math.floor(nodeIndex/columns),slot=nodeIndex%columns,nodeAngle=angle+(slot-mid)*spread+(ring%2?.022:-.022),distance=radius+222+ring*150+(slot%2?12:0);placeSprig(n,distance,nodeAngle,0)})});
+      // Each root branch owns a disjoint angular sector. Every descendant is
+      // recursively placed inside that same sector, so neither cards nor
+      // connections can spill into another branch's subtree.
+      rootPos={x:0,y:0};
+      const radialGap=64,cardSpan=m=>Math.hypot(m.w,m.h),radialCache=new Map();
+      const radialSpan=n=>{const key=String(n.id);if(radialCache.has(key))return radialCache.get(key);const kids=childOf(n),own=cardSpan(metrics.get(key)),value=kids.length?Math.max(own,kids.reduce((sum,kid)=>sum+radialSpan(kid),0)+radialGap*(kids.length-1)):own;radialCache.set(key,value);return value};
+      const forestSpan=forest=>forest.length?forest.reduce((sum,n)=>sum+radialSpan(n),0)+radialGap*(forest.length-1):0;
+      const branchSpans=branchData.map(branch=>Math.max(cardSpan(branch.m)+radialGap,forestSpan(rootsFor(branch))+radialGap));
+      const branchCount=Math.max(branchData.length,1),sectorGap=Math.min(.17,Math.max(.07,Math.PI*2/(branchCount*16))),usableAngle=Math.max(Math.PI,Math.PI*2-sectorGap*branchCount),totalSpan=Math.max(1,branchSpans.reduce((sum,span)=>sum+span,0)),branchRadius=Math.max(390,Math.hypot(rootBox.w,rootBox.h)/2+210,Math.min(720,totalSpan/usableAngle*.2)),firstNodeRadius=branchRadius+190,nodeRadiusStep=192,polar=(distance,angle)=>({x:Math.cos(angle)*distance,y:Math.sin(angle)*distance});
+      const placeForest=(forest,depth,start,end)=>{if(!forest.length)return;const span=forestSpan(forest),range=end-start;let cursor=start;forest.forEach(n=>{const part=range*radialSpan(n)/span,childEnd=cursor+part;placeTreeInSector(n,depth,cursor,childEnd);cursor=childEnd+range*radialGap/span})};
+      const placeTreeInSector=(n,depth,start,end)=>{const angle=(start+end)/2,radius=firstNodeRadius+depth*nodeRadiusStep;positions.set(String(n.id),polar(radius,angle));nodeSectors.set(String(n.id),{start,end,minRadius:Math.max(firstNodeRadius-42,radius-68)});placeForest(childOf(n),depth+1,start,end)};
+      let sectorStart=-Math.PI/2;
+      branchData.forEach((branch,index)=>{const sectorSize=usableAngle*branchSpans[index]/totalSpan,sectorEnd=sectorStart+sectorSize,angle=(sectorStart+sectorEnd)/2;branchPositions.set(String(branch.id),polar(branchRadius,angle));placeForest(rootsFor(branch),0,sectorStart,sectorEnd);sectorStart=sectorEnd+sectorGap});
       const items=[{...rootPos,m:rootBox},...branchData.map(b=>({...branchPositions.get(String(b.id)),m:b.m})),...nodes.map(n=>({...positions.get(String(n.id)),m:metrics.get(String(n.id))}))];const bounds=items.reduce((a,item)=>({minX:Math.min(a.minX,item.x-item.m.w/2),maxX:Math.max(a.maxX,item.x+item.m.w/2),minY:Math.min(a.minY,item.y-item.m.h/2),maxY:Math.max(a.maxY,item.y+item.m.h/2)}),{minX:Infinity,maxX:-Infinity,minY:Infinity,maxY:-Infinity}),dx=pad-bounds.minX,dy=pad-bounds.minY;W=Math.max(920,bounds.maxX-bounds.minX+pad*2);H=Math.max(660,bounds.maxY-bounds.minY+pad*2);rootPos.x+=dx;rootPos.y+=dy;branchPositions.forEach(p=>{p.x+=dx;p.y+=dy});positions.forEach(p=>{p.x+=dx;p.y+=dy});
     }
     branchData.forEach(branch=>{const p=branchPositions.get(String(branch.id));if(p&&hasPoint(branch)){p.x=Number(branch.layout_x);p.y=Number(branch.layout_y)}});
@@ -50,12 +58,18 @@ window.MM = (() => {
     // Keep cards compact, but never let their rectangles touch. The relaxed
     // force pass makes nearby cards glide apart in their natural (usually
     // diagonal) direction instead of snapping one card along a hard axis.
-    const nodeCards=nodes.map((node,index)=>({p:positions.get(String(node.id)),m:metrics.get(String(node.id)),movable:true,index})).filter(item=>item.p&&item.m);
+    const nodeCards=nodes.map((node,index)=>({p:positions.get(String(node.id)),m:metrics.get(String(node.id)),movable:true,index,sector:nodeSectors.get(String(node.id))})).filter(item=>item.p&&item.m);
     const fixedCards=[{p:rootPos,m:rootBox,movable:false,index:-1},...branchData.map((branch,index)=>({p:branchPositions.get(String(branch.id)),m:branch.m,movable:false,index:-index-2}))].filter(item=>item.p&&item.m);
     const collisionCards=[...nodeCards,...fixedCards], clearance=28;
     nodeCards.forEach(item=>item.home={x:item.p.x,y:item.p.y});
-    const separate=(a,b,amount)=>{const dx=b.p.x-a.p.x,dy=b.p.y-a.p.y,nearZero=Math.abs(dx)+Math.abs(dy)<.01,angle=nearZero?(a.index*2.3999632297):(Math.atan2(dy,dx)),nx=nearZero?Math.cos(angle):dx/Math.hypot(dx,dy),ny=nearZero?Math.sin(angle):dy/Math.hypot(dx,dy),both=a.movable&&b.movable,shareA=both?.5:a.movable?1:0,shareB=both?.5:b.movable?1:0;a.p.x-=nx*amount*shareA;a.p.y-=ny*amount*shareA;b.p.x+=nx*amount*shareB;b.p.y+=ny*amount*shareB;};
-    for(let pass=0;pass<260;pass++){
+    const automaticMindmap=rootPosition==='center'&&!branchData.some(hasPoint)&&!nodes.some(hasPoint),constrainToSector=item=>{if(!automaticMindmap||!item.sector)return;const center=(item.sector.start+item.sector.end)/2,dx=item.p.x-rootPos.x,dy=item.p.y-rootPos.y,radius=Math.max(item.sector.minRadius,Math.hypot(dx,dy)),inset=Math.min((item.sector.end-item.sector.start)*.22,Math.asin(Math.min(.42,(Math.hypot(item.m.w,item.m.h)/2+18)/radius)));let angle=Math.atan2(dy,dx);while(angle<center-Math.PI)angle+=Math.PI*2;while(angle>center+Math.PI)angle-=Math.PI*2;angle=Math.max(item.sector.start+inset,Math.min(item.sector.end-inset,angle));item.p.x=rootPos.x+Math.cos(angle)*radius;item.p.y=rootPos.y+Math.sin(angle)*radius;};
+    const separate=(a,b,amount)=>{const dx=b.p.x-a.p.x,dy=b.p.y-a.p.y,nearZero=Math.abs(dx)+Math.abs(dy)<.01,angle=nearZero?(a.index*2.3999632297):(Math.atan2(dy,dx)),nx=nearZero?Math.cos(angle):dx/Math.hypot(dx,dy),ny=nearZero?Math.sin(angle):dy/Math.hypot(dx,dy),both=a.movable&&b.movable,shareA=both?.5:a.movable?1:0,shareB=both?.5:b.movable?1:0;a.p.x-=nx*amount*shareA;a.p.y-=ny*amount*shareA;b.p.x+=nx*amount*shareB;b.p.y+=ny*amount*shareB;constrainToSector(a);constrainToSector(b);};
+    // A clean calculated tree already has non-overlapping lanes/sectors. Do
+    // not run a force pass on it: a force solver can move a card through a
+    // neighbouring subtree and thereby create crossing connections. It is
+    // reserved for layouts that deliberately contain manual placements.
+    const preserveAutomaticLayout=!branchData.some(hasPoint)&&!nodes.some(hasPoint);
+    for(let pass=0;pass<(preserveAutomaticLayout&&!automaticMindmap?0:260);pass++){
       // A gentle spring retains the user's chosen placement after collisions
       // have settled, without pulling cards back into one another.
       if(pass<150)nodeCards.forEach(item=>{item.p.x+=(item.home.x-item.p.x)*.012;item.p.y+=(item.home.y-item.p.y)*.012});
