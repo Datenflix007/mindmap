@@ -167,8 +167,40 @@ begin
   select * into s from public.mm_sessions where code=upper(btrim(p_code));
   if not found then return null; end if;
   return jsonb_build_object(
-    'session',jsonb_build_object('id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at),
+    'session',jsonb_build_object(
+      'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
+      'participants_can_export',s.participants_can_export,
+      'root_position',s.root_position,'root_orientation',s.root_orientation
+    ),
     'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb)
+  );
+end $$;
+
+-- Gemeinsamer Lesestand für Teilnehmende: Damit alle dieselbe räumliche
+-- Anordnung sehen, enthält die Teilnehmeransicht die gesamte Mindmap. Schreibrechte
+-- bleiben über die gruppengebundenen Funktionen strikt auf die eigene Gruppe begrenzt.
+create or replace function public.get_participant_snapshot(p_code text)
+returns jsonb
+language plpgsql
+security definer
+set search_path=public, extensions
+as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found then return null; end if;
+  return jsonb_build_object(
+    'session',jsonb_build_object(
+      'id',s.id,'code',s.code,'title',s.title,'is_open',s.is_open,'created_at',s.created_at,
+      'participants_can_export',s.participants_can_export,
+      'root_position',s.root_position,'root_orientation',s.root_orientation
+    ),
+    'branches',coalesce((select jsonb_agg(jsonb_build_object('id',id,'title',title,'sort_order',sort_order,'color',color,'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y) order by sort_order) from public.mm_branches where session_id=s.id),'[]'::jsonb),
+    'nodes',coalesce((select jsonb_agg(jsonb_build_object(
+      'id',id,'branch_id',branch_id,'parent_id',parent_id,'group_no',group_no,
+      'text',text,'created_at',created_at,'updated_at',updated_at,
+      'layout_x',layout_x,'layout_y',layout_y,'bend_x',bend_x,'bend_y',bend_y
+    ) order by created_at) from public.mm_nodes where session_id=s.id),'[]'::jsonb)
   );
 end $$;
 
@@ -403,6 +435,35 @@ begin
   elsif p_kind='node' then update public.mm_nodes set layout_x=p_x,layout_y=p_y,updated_at=now() where id=p_id and session_id=s.id;
   else raise exception 'Ungültiger Layouttyp'; end if;
   if not found then raise exception 'Layoutobjekt nicht gefunden'; end if;
+end $$;
+
+-- Teilnehmende dürfen ausschließlich die Position ihrer eigenen Knoten ändern.
+create or replace function public.update_group_layout_item(
+  p_code text, p_group_no int, p_node_id uuid, p_x double precision, p_y double precision
+)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found then raise exception 'Session nicht gefunden'; end if;
+  if not s.is_open then raise exception 'Die Session ist gesperrt'; end if;
+  if p_group_no not between 1 and 99 then raise exception 'Ungültige Gruppe'; end if;
+  if p_x is null or p_y is null or abs(p_x)>10000 or abs(p_y)>10000 then raise exception 'Ungültige Position'; end if;
+  update public.mm_nodes set layout_x=p_x,layout_y=p_y,updated_at=now()
+    where id=p_node_id and session_id=s.id and group_no=p_group_no;
+  if not found then raise exception 'Knoten nicht gefunden oder nicht in eurer Gruppe'; end if;
+end $$;
+
+-- Entfernt gespeicherte manuelle Eingriffe. Das Frontend berechnet anschließend
+-- eine überlappungsfreie, einheitliche Baumansicht für Referent und Teilnehmende.
+create or replace function public.moderator_auto_arrange(p_code text,p_moderator_token text)
+returns void language plpgsql security definer set search_path=public, extensions as $$
+declare s public.mm_sessions;
+begin
+  select * into s from public.mm_sessions where code=upper(btrim(p_code));
+  if not found or not public.mm_token_ok(s.id,p_moderator_token) then raise exception 'Moderator-Zugriff verweigert'; end if;
+  update public.mm_branches set layout_x=null,layout_y=null,bend_x=null,bend_y=null where session_id=s.id;
+  update public.mm_nodes set layout_x=null,layout_y=null,bend_x=null,bend_y=null,updated_at=now() where session_id=s.id;
 end $$;
 
 create or replace function public.update_layout_bend(
@@ -680,6 +741,7 @@ end $$;
 
 grant execute on function public.create_session(text,text,text[]) to anon, authenticated;
 grant execute on function public.get_session_public(text) to anon, authenticated;
+grant execute on function public.get_participant_snapshot(text) to anon, authenticated;
 grant execute on function public.get_group_nodes(text,int) to anon, authenticated;
 grant execute on function public.add_node(text,int,uuid,uuid,text) to anon, authenticated;
 grant execute on function public.update_node(text,int,uuid,text) to anon, authenticated;
@@ -695,7 +757,9 @@ grant execute on function public.moderator_add_node(text,text,uuid,uuid,text) to
 grant execute on function public.moderator_update_node(text,text,uuid,text) to anon, authenticated;
 grant execute on function public.moderator_move_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.update_layout_item(text,text,text,uuid,double precision,double precision) to anon, authenticated;
+grant execute on function public.update_group_layout_item(text,int,uuid,double precision,double precision) to anon, authenticated;
 grant execute on function public.update_layout_bend(text,text,text,uuid,double precision,double precision) to anon, authenticated;
+grant execute on function public.moderator_auto_arrange(text,text) to anon, authenticated;
 grant execute on function public.moderator_reparent_node(text,text,uuid,uuid) to anon, authenticated;
 grant execute on function public.moderator_delete_node(text,text,uuid) to anon, authenticated;
 grant execute on function public.delete_session(text,text) to anon, authenticated;
